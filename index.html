@@ -260,7 +260,7 @@ footer a { color: var(--accent); }
     <div class="reader-bar"><select id="chsel" aria-label="Pilih bab" hidden></select></div>
     <article class="reader" id="reader"></article>
   </section>
-  <footer>Semua proses berjalan di browser Anda. PDF tidak dikirim ke server mana pun.</footer>
+  <footer>Semua proses berjalan di browser Anda. PDF tidak dikirim ke server mana pun. · Versi 16 Okt 2026 (15.30)</footer>
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
@@ -417,6 +417,7 @@ function wordsToLines(words) {
       bold: toks.filter(t => t[1]).reduce((s, t) => s + t[0].length, 0) / nchar > 0.9,
       italic: toks.filter(t => t[2]).reduce((s, t) => s + t[0].length, 0) / nchar > 0.9,
       hint: hints.length ? mostCommon(hints) : null,
+      conf: ws.some(w => w.conf != null) ? ws.reduce((s, w) => s + (w.conf ?? 0), 0) / ws.length : null,
     });
   }
   return out;
@@ -587,6 +588,7 @@ function junkHeading(t) {
   if (/\.$/.test(t) && t.split(/\s+/).length > 3) return true; // kalimat biasa
   for (const w of t.split(/\s+/)) {                           // huruf acak hasil OCR: "MISter", "chimMNneys"
     if (/\p{Ll}\p{Lu}/u.test(w) || /\p{Lu}{2,}\p{Ll}/u.test(w)) return true;
+    if (/\p{L}\d|\d\p{L}/u.test(w)) return true;            // "Epalih73": campuran huruf-angka acak
   }
   return false;
 }
@@ -612,13 +614,48 @@ function refineHeadings(pages) {
   // judul yang sama berulang (mis. "GRAMEDIA penerbit buku utama") bukan judul bab
   const count = new Map();
   for (const l of lines) if (l.hlevel) { const k = l.text.trim().toLowerCase(); count.set(k, (count.get(k) || 0) + 1); }
-  const useChap = new Set([...chap].filter(l => !/^\d{1,3}\.?$/.test(l.text.trim()))).size >= 3;
+  const nChap = new Set([...chap].filter(l => !/^\d{1,3}\.?$/.test(l.text.trim()))).size;
+  const useChap = nChap >= 3;
+  // buku berbab (novel): judul lain yang sangat jarang = sampah OCR (logo, hiasan), bukan sub-judul
   for (const l of lines) {
     if (useChap && chap.has(l)) { l.hlevel = 1; continue; }
     if (!l.hlevel || l._outline) continue;
     const t = l.text.trim();
-    if (junkHeading(t) || (count.get(t.toLowerCase()) || 0) >= 2) { l.hlevel = 0; continue; }
-    if (useChap) l.hlevel = Math.max(2, l.hlevel);           // judul lain jadi sub-judul
+    if (junkHeading(t) || (count.get(t.toLowerCase()) || 0) >= 2) l.hlevel = 0;
+  }
+  const others = useChap ? lines.filter(l => l.hlevel && !chap.has(l) && !l._outline) : [];
+  const dropOthers = useChap && others.length < 0.3 * nChap;
+  for (const l of others) l.hlevel = dropOthers ? 0 : Math.max(2, l.hlevel);  // sisa: sampah langka, atau sub-judul
+}
+
+function within1(a, b) {
+  if (Math.abs(a.length - b.length) > 1 || a === b) return a === b;
+  let i = 0, j = 0, diff = 0;
+  while (i < a.length && j < b.length) {
+    if (a[i] === b[j]) { i++; j++; continue; }
+    if (++diff > 1) return false;
+    if (a.length > b.length) i++; else if (b.length > a.length) j++; else { i++; j++; }
+  }
+  return diff + (a.length - i) + (b.length - j) <= 1;
+}
+function fixHeadingTypos(pages, vocab) {
+  // salah ketik OCR di judul ("JMMY", "PELTUALANGAN") dicocokkan dengan kata yang sering muncul di isi buku
+  const common = [...vocab].filter(([w, n]) => n >= 3 && w.length >= 4 && /^\p{L}+$/u.test(w));
+  for (const p of pages) for (const it of p.items) {
+    if (it.type !== "line" || !it.hlevel) continue;
+    for (const t of it.tokens) {
+      const m = t[0].match(/^([^\p{L}]*)(\p{L}{4,})([^\p{L}]*)$/u);
+      if (!m) continue;
+      const lw = m[2].toLowerCase();
+      if ((vocab.get(lw) || 0) >= 2) continue;
+      let best = null, bn = 0;
+      // hanya huruf hilang/berlebih (JMMY→JIMMY); huruf tertukar bisa jadi kata lain yang benar (bertamu/bertemu)
+      for (const [w, n] of common) if (n > bn && w.length !== lw.length && within1(lw, w)) { best = w; bn = n; }
+      if (!best) continue;
+      const fixed = m[2] === m[2].toUpperCase() ? best.toUpperCase() : m[2][0] === m[2][0].toUpperCase() ? best[0].toUpperCase() + best.slice(1) : best;
+      t[0] = m[1] + fixed + m[3];
+    }
+    it.text = it.tokens.map(t => (t[4] ? " " : "") + t[0]).join("");
   }
 }
 
@@ -655,7 +692,7 @@ function resolveHyphen(frag, nxt, vocab, hyph) {
 function isBreak(prev, ln, M, stats) {
   const same = prev._page === ln._page && prev.group === ln.group;
   if (BULLET_RE.test(ln.text)) return true;
-  if (Math.abs(ln.size - prev.size) > 0.18 * Math.max(prev.size, 0.1)) return true;
+  if (Math.abs(ln.size - prev.size) > (ln.src === "ocr" ? 0.4 : 0.18) * Math.max(prev.size, 0.1)) return true;
   if (!!prev._note !== !!ln._note) return true;
   const m = M.get(ln._page + ":" + ln.group);
   if (!same || !m) {
@@ -709,6 +746,8 @@ function tokensToHtml(lines, vocab, hyph) {
   }
   toks.forEach((t, i) => {
     t[0] = t[0].replace(/­/g, "");
+    // tanda kutip hasil OCR: di awal kata = pembuka, di akhir kata = penutup; buang yang dobel
+    t[0] = t[0].replace(/^["“”]{1,3}(?=[\p{L}\p{N}])/u, "“").replace(/(?<=[\p{L}\p{N}.,!?…—-])["“”]{1,3}$/u, "”");
     if (i && /^[,.;:!?)\]}%»”’…]/.test(t[0]) && !t[3]) t[4] = false;
     if (i && /[(\[{«“‘]$/.test(toks[i - 1][0])) t[4] = false;
   });
@@ -766,6 +805,7 @@ function buildBlocks(pages, outline) {
   refineHeadings(pages);
   const M = pageMetrics(pages);
   const [vocab, hyph] = buildVocab(pages);
+  fixHeadingTypos(pages, vocab);
   // "Babi", "Babii", "Bab1" (judul bab small caps / spasi hilang) -> "Bab I", "Bab II", "Bab 1"
   const CH_RE = /^(bab|bagian|chapter|part)\s*([ivxlcdm]{1,6}|\d{1,3})\.?$/i;
   let chCount = 0;
@@ -1357,7 +1397,7 @@ async function ocrPage(page, pno, opts, worker) {
     const lb = ln.bbox, rh = (ln.rowAttributes && ln.rowAttributes.row_height) || (lb.y1 - lb.y0);
     for (const wd of ln.words || []) {
       const t = (wd.text || "").trim(), conf = wd.confidence;
-      if (!t || conf < 15 || (conf < 30 && !/[A-Za-z0-9]{2}/.test(t))) continue;
+      if (!t || (conf < 30 && !/[A-Za-z0-9]{2}/.test(t)) || (conf < 15 && !/^["“”'‘’(—–-]+\p{L}{2}/u.test(t))) continue; // kata berawalan tanda kutip sering diberi skor ~0 walau benar
       raw.push({ t, conf, b: wd.bbox, lb, rh, hint: bi + "-" + pi });
     }
   })));
@@ -1367,7 +1407,9 @@ async function ocrPage(page, pno, opts, worker) {
   const words = [];
   for (const r of raw) {
     if (inFig((r.b.x0 + r.b.x1) / 2, (r.b.y0 + r.b.y1) / 2)) continue;
-    words.push(makeWord(r.t, r.b.x0 * k, r.lb.y0 * k, r.b.x1 * k, r.lb.y1 * k, Math.round(r.rh * k * 10) / 10, false, false, r.hint));
+    const wd = makeWord(r.t, r.b.x0 * k, r.lb.y0 * k, r.b.x1 * k, r.lb.y1 * k, Math.round(r.rh * k * 10) / 10, false, false, r.hint);
+    wd.conf = r.conf;
+    words.push(wd);
   }
   const W = canvas.width * k, H = canvas.height * k;
   const gut = findGutter(words, W, H);
@@ -1377,6 +1419,8 @@ async function ocrPage(page, pno, opts, worker) {
     const tk = ln.tokens;
     if (tk.length > 1 && OCR_BULLETS.has(tk[0][0]) && /^\p{Lu}/u.test(tk[1][0])) { tk[0][0] = "•"; ln.text = tk.map(t => (t[4] ? " " : "") + t[0]).join(""); }
     const letters = [...ln.text].filter(ch => /[\p{L}\p{N}]/u.test(ch)).length;
+    // sampah OCR dari logo/hiasan: baris pendek yang hasil bacaannya tidak yakin ("Gn", "msi", "73 alih")
+    if (ln.conf != null && !/["“”'‘’.,?!…—–-]/.test(ln.text) && ((letters < 4 && ln.conf < 70) || (letters < 9 && ln.conf < 50))) continue;
     if (letters >= Math.max(2, 0.4 * ln.text.replace(/ /g, "").length)) { ln.src = "ocr"; items.push(ln); }
   }
   for (const b of figs) {
