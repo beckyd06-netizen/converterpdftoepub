@@ -239,6 +239,7 @@ footer a { color: var(--accent); }
     <div class="bar"><i id="barfill"></i></div>
     <div class="status" id="stat">Menyiapkan…</div>
     <div class="sub" id="substat"></div>
+    <div class="note">Boleh pindah ke tab atau aplikasi lain, prosesnya tetap jalan. Jangan tutup halaman ini sampai selesai; Anda akan diberi notifikasi.</div>
     <details class="logd"><summary>Catatan proses</summary><div class="log" id="log"></div></details>
   </section>
 
@@ -546,17 +547,78 @@ function classifyHeadings(pages, body, outline) {
         for (let j = 0; j < lines.length && !done; j++) {
           const nl = norm(lines[j].text);
           if (nl && (nt.startsWith(nl) || nl.startsWith(nt)) && nl.length >= Math.min(4, nt.length)) {
-            lines[j].hlevel = Math.min(lvl + 1, 3);
+            lines[j].hlevel = Math.min(lvl + 1, 3); lines[j]._outline = true;
             let acc = nl;
             for (let k = j + 1; k < Math.min(j + 3, lines.length); k++) {
               const n2 = norm(lines[k].text);
-              if (n2 && nt.startsWith(acc + n2)) { lines[k].hlevel = Math.min(lvl + 1, 3); acc += n2; }
+              if (n2 && nt.startsWith(acc + n2)) { lines[k].hlevel = Math.min(lvl + 1, 3); lines[k]._outline = true; acc += n2; }
             }
             done = true;
           }
         }
       }
     }
+  }
+}
+
+/* Rapikan judul: kenali pola judul bab, buang judul palsu (hasil OCR/ukuran huruf acak) */
+const CHAP_NUM_RE = /^(\d{1,3})[.)]?\s+(\S.{1,90})$/;
+const CHAP_WORD_RE = /^(bab|bagian|chapter|part|prolog|epilog|prologue|epilogue)\b.{0,70}$/i;
+function upperRatio(t) {
+  let L = 0, U = 0;
+  for (const c of t) if (/\p{L}/u.test(c)) { L++; if (c === c.toUpperCase() && c !== c.toLowerCase()) U++; }
+  return L ? U / L : 0;
+}
+const letterCount = t => [...t].filter(c => /\p{L}/u.test(c)).length;
+function isChapterLine(t) {
+  t = t.trim();
+  if (t.length > 95) return false;
+  const m = t.match(CHAP_NUM_RE);
+  if (m && letterCount(m[2]) >= 3 && upperRatio(m[2]) >= 0.8) return true;
+  if (CHAP_WORD_RE.test(t) && (upperRatio(t) >= 0.8 || /^\S+\s+([ivxlcdm]+|\d+)\b/i.test(t))) return true;
+  return false;
+}
+function junkHeading(t) {
+  t = t.trim();
+  if (letterCount(t) < 3) return true;                       // "Gn", "Da"
+  if (/^["“”'‘’(\[«»—–-]/.test(t)) return true;             // dialog
+  if (startsLower(t)) return true;                            // potongan kalimat
+  if (/[,;:]$/.test(t)) return true;
+  if (/\.$/.test(t) && t.split(/\s+/).length > 3) return true; // kalimat biasa
+  for (const w of t.split(/\s+/)) {                           // huruf acak hasil OCR: "MISter", "chimMNneys"
+    if (/\p{Ll}\p{Lu}/u.test(w) || /\p{Lu}{2,}\p{Ll}/u.test(w)) return true;
+  }
+  return false;
+}
+function refineHeadings(pages) {
+  const lines = [];
+  for (const p of pages) { const ls = p.items.filter(it => it.type === "line"); ls.forEach((l, i) => { l._pg = p; l._next = ls[i + 1]; }); lines.push(...ls); }
+  const chap = new Set();
+  for (const l of lines) {
+    const t = l.text.trim();
+    if (isChapterLine(t)) chap.add(l);
+    // "5" di satu baris, judul KAPITAL di baris berikutnya
+    else if (/^\d{1,3}\.?$/.test(t) && l._next && l._next.top - l.bottom < 3 * l.size) {
+      const nt = l._next.text.trim();
+      if (letterCount(nt) >= 3 && nt.length <= 80 && upperRatio(nt) >= 0.8) { chap.add(l); chap.add(l._next); }
+    }
+  }
+  // judul bab yang terpotong dua baris: "33. BATTLE MEMBERI" + "PENJELASAN"
+  for (const l of [...chap]) {
+    const n = l._next;
+    if (n && !chap.has(n) && n._pg === l._pg && n.top - l.bottom < 1.2 * l.size && letterCount(n.text) >= 3 &&
+        n.text.trim().length <= 60 && upperRatio(n.text) >= 0.8 && !isChapterLine(n.text)) chap.add(n);
+  }
+  // judul yang sama berulang (mis. "GRAMEDIA penerbit buku utama") bukan judul bab
+  const count = new Map();
+  for (const l of lines) if (l.hlevel) { const k = l.text.trim().toLowerCase(); count.set(k, (count.get(k) || 0) + 1); }
+  const useChap = new Set([...chap].filter(l => !/^\d{1,3}\.?$/.test(l.text.trim()))).size >= 3;
+  for (const l of lines) {
+    if (useChap && chap.has(l)) { l.hlevel = 1; continue; }
+    if (!l.hlevel || l._outline) continue;
+    const t = l.text.trim();
+    if (junkHeading(t) || (count.get(t.toLowerCase()) || 0) >= 2) { l.hlevel = 0; continue; }
+    if (useChap) l.hlevel = Math.max(2, l.hlevel);           // judul lain jadi sub-judul
   }
 }
 
@@ -701,8 +763,19 @@ function buildBlocks(pages, outline) {
   const body = bodySizes(pages);
   mergeDropCaps(pages, body);
   classifyHeadings(pages, body, outline);
+  refineHeadings(pages);
   const M = pageMetrics(pages);
   const [vocab, hyph] = buildVocab(pages);
+  // "Babi", "Babii", "Bab1" (judul bab small caps / spasi hilang) -> "Bab I", "Bab II", "Bab 1"
+  const CH_RE = /^(bab|bagian|chapter|part)\s*([ivxlcdm]{1,6}|\d{1,3})\.?$/i;
+  let chCount = 0;
+  for (const p of pages) for (const it of p.items) if (it.type === "line" && it.hlevel && CH_RE.test(it.text.trim())) chCount++;
+  const normCh = t => {
+    const m = t.trim().match(CH_RE);
+    if (!m || chCount < 2) return t;
+    const w = m[1] === m[1].toUpperCase() ? m[1] : m[1][0].toUpperCase() + m[1].slice(1).toLowerCase();
+    return `${w} ${m[2].toUpperCase()}`;
+  };
   const stats = { gap: 0, indent: 0 };
   const blocks = [];
   let cur = [], pending = [];
@@ -749,7 +822,7 @@ function buildBlocks(pages, outline) {
       }
       if (it.hlevel) {
         flush();
-        const txt = smartTypo(it.text.trim(), "");
+        const txt = smartTypo(normCh(it.text.trim()), "");
         const last = blocks[blocks.length - 1];
         if (last && last.t === "h" && last.page === p.page && (last.level === it.hlevel || BAB_RE.test(last.plain)) && it.top - last.bottom < 2.2 * it.size) {
           if (BAB_RE.test(last.plain) && !last.html.includes("<span")) last.html = `<span class="num">${last.html}</span>${esc(txt)}`;
@@ -828,9 +901,29 @@ function log(msg) { const el = $("log"); el.textContent += msg + "\n"; el.scroll
 function setStatus(main, sub, frac) {
   if (main != null) $("stat").textContent = main;
   if (sub != null) $("substat").textContent = sub;
-  if (frac != null) $("barfill").style.width = Math.max(0, Math.min(100, frac * 100)).toFixed(1) + "%";
+  if (frac != null) {
+    $("barfill").style.width = Math.max(0, Math.min(100, frac * 100)).toFixed(1) + "%";
+    document.title = running && frac > 0 && frac < 1 ? `(${Math.round(frac * 100)}%) ${BASE_TITLE}` : BASE_TITLE;
+  }
 }
-const tick = () => new Promise(r => setTimeout(r, 0));
+// jeda singkat antar halaman; MessageChannel tidak diperlambat browser saat tab di latar belakang
+const tick = () => new Promise(r => { const ch = new MessageChannel(); ch.port1.onmessage = () => r(); ch.port2.postMessage(0); });
+const BASE_TITLE = document.title;
+let wakeLock = null;
+async function keepAwake(on) {
+  try {
+    if (on && "wakeLock" in navigator && document.visibilityState === "visible") wakeLock = await navigator.wakeLock.request("screen");
+    else if (!on && wakeLock) { await wakeLock.release(); wakeLock = null; }
+  } catch (e) {}
+}
+document.addEventListener("visibilitychange", () => { if (running && document.visibilityState === "visible") keepAwake(true); });
+function ocrParallel(nPages) {
+  const hc = navigator.hardwareConcurrency || 2;
+  const mobile = /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent) || (navigator.userAgentData && navigator.userAgentData.mobile);
+  const mem = navigator.deviceMemory || (mobile ? 3 : 8);
+  const n = mobile ? (mem >= 6 ? 2 : 1) : Math.min(4, Math.max(1, hc - 1), mem >= 8 ? 4 : 2);
+  return Math.max(1, Math.min(n, nPages));
+}
 const fmtSize = n => n > 1048576 ? (n / 1048576).toFixed(1) + " MB" : Math.max(1, Math.round(n / 1024)) + " KB";
 
 /* ---------- pilih file & seret-lepas ---------- */
@@ -1174,6 +1267,16 @@ async function textPage(page, pno, info, logoKeys, opts) {
 
 /* ---------- OCR ---------- */
 let tessWorker = null;
+const tessPool = [];
+async function getTessPool(n) {
+  if (!tessPool.length && tessWorker) tessPool.push(tessWorker);
+  while (tessPool.length < n) {
+    tessWorker = null;
+    try { tessPool.push(await getTesseract()); } catch (e) { break; }
+  }
+  tessWorker = tessPool[0] || null;
+  return tessPool.slice(0, Math.max(1, n));
+}
 async function getTesseract(onProgress) {
   if (tessWorker) return tessWorker;
   if (!window.Tesseract) throw new Error("Pustaka OCR tidak termuat.");
@@ -1241,13 +1344,13 @@ function rotateCanvas(c, deg) {
   return r;
 }
 
-async function ocrPage(page, pno, opts) {
+async function ocrPage(page, pno, opts, worker) {
   let canvas = await renderPage(page, opts.dpi / 72, 6e6);
   const k = 1 / canvas._scale;
   const ang = deskewAngle(canvas);
   if (Math.abs(ang) > 0.15) canvas = rotateCanvas(canvas, ang);
   const ocrInput = normalizeForOcr(canvas);
-  const worker = await getTesseract();
+  worker = worker || await getTesseract();
   const { data } = await worker.recognize(ocrInput, {}, { blocks: true, text: false, hocr: false, tsv: false });
   const raw = [];
   (data.blocks || []).forEach((bl, bi) => (bl.paragraphs || []).forEach((pa, pi) => (pa.lines || []).forEach((ln, li) => {
@@ -1321,8 +1424,7 @@ div.cover { text-align: center; margin: 0; padding: 0; height: 100%; }
 div.cover img { max-width: 100%; max-height: 100%; }
 nav ol { list-style: none; padding-left: 1em; } nav > ol { padding-left: 0; } nav li { margin: .3em 0; }
 `;
-const xhtml = (title, body, bodyAttr = "") => `<?xml version="1.0" encoding="utf-8"?>
-<!DOCTYPE html>
+const xhtml = (title, body, bodyAttr = "") => `<!DOCTYPE html>
 <html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" lang="id" xml:lang="id">
 <head>
 <meta charset="utf-8"/>
@@ -1477,6 +1579,8 @@ async function convert() {
   $("clear").disabled = true;
   $("savemsg").textContent = ""; $("saverow").hidden = true;
   const t0 = performance.now();
+  keepAwake(true);
+  try { if ("Notification" in window && Notification.permission === "default") Notification.requestPermission().catch(() => {}); } catch (e) {}
   const opts = {
     ocr: document.querySelector('input[name="ocr"]:checked').value,
     images: $("imgs").value === "on", imgDpi: 200, dpi: 300, maxImg: 1600,
@@ -1529,23 +1633,41 @@ async function convert() {
         throw new Error("Mesin OCR tidak bisa dimuat di tampilan ini. PDF digital tetap bisa dikonversi dengan OCR dimatikan; untuk PDF scan, coba muat ulang halaman atau pakai browser lain.");
       }
     }
-    const pages = [];
-    let ocrDone = 0;
-    for (let i = 0; i < idx.length; i++) {
+    const results = new Map();
+    let doneCount = 0;
+    const prog = label => { setStep(1, label); setStatus(null, "", 0.2 + 0.72 * doneCount / idx.length); };
+    for (const pno of idx.filter(p => !needOcr.has(p))) {
       if (cancelled) throw new Error("Dibatalkan.");
-      const pno = idx[i], page = await pdf.getPage(pno + 1);
-      const isOcr = needOcr.has(pno);
-      const eta = isOcr && ocrDone ? ` · sisa ±${Math.ceil((performance.now() - t0) / 1000 / ocrDone * (needOcr.size - ocrDone) / 60)} mnt` : "";
-      setStep(1, `${isOcr ? "OCR · " : ""}halaman ${pno + 1} (${i + 1} dari ${idx.length})${eta}`);
-      setStatus(null, "", 0.2 + 0.72 * i / idx.length);
+      prog(`halaman ${pno + 1} (${doneCount + 1} dari ${idx.length})`);
+      const page = await pdf.getPage(pno + 1);
+      try { results.set(pno, await textPage(page, pno, infos.get(pno), logoKeys, opts)); }
+      catch (e) { log(`Halaman ${pno + 1} dilewati: ${e && e.message || e}`); }
+      page.cleanup(); doneCount++;
       await tick();
-      try {
-        const r = isOcr ? await ocrPage(page, pno, opts) : await textPage(page, pno, infos.get(pno), logoKeys, opts);
-        pages.push(r);
-        if (isOcr) ocrDone++;
-      } catch (e) { log(`Halaman ${pno + 1} dilewati: ${e && e.message || e}`); }
-      page.cleanup();
     }
+    const ocrList = idx.filter(p => needOcr.has(p));
+    if (ocrList.length) {
+      const want = ocrParallel(ocrList.length);
+      if (want > 1) prog(`menyiapkan ${want} mesin OCR sekaligus`);
+      const workers = await getTessPool(want);
+      log(`OCR ${ocrList.length} halaman dengan ${workers.length} mesin sekaligus.`);
+      const ocrT0 = performance.now();
+      let next = 0, ocrDone = 0;
+      prog(`OCR 0/${ocrList.length}${workers.length > 1 ? ` · ${workers.length} halaman sekaligus` : ""}`);
+      await Promise.all(workers.map(async w => {
+        while (next < ocrList.length && !cancelled) {
+          const pno = ocrList[next++];
+          const page = await pdf.getPage(pno + 1);
+          try { results.set(pno, await ocrPage(page, pno, opts, w)); }
+          catch (e) { log(`Halaman ${pno + 1} dilewati: ${e && e.message || e}`); }
+          page.cleanup(); ocrDone++; doneCount++;
+          const left = (performance.now() - ocrT0) / 1000 / ocrDone * (ocrList.length - ocrDone);
+          prog(`OCR ${ocrDone}/${ocrList.length}${workers.length > 1 ? ` · ${workers.length} halaman sekaligus` : ""}${ocrDone < ocrList.length ? ` · sisa ±${left < 90 ? Math.ceil(left) + " dtk" : Math.ceil(left / 60) + " mnt"}` : ""}`);
+        }
+      }));
+      if (cancelled) throw new Error("Dibatalkan.");
+    }
+    const pages = idx.filter(p => results.has(p)).map(p => results.get(p));
     // sampul
     let cover = null, ordered = pages;
     const coverMode = $("cover").value;
@@ -1575,12 +1697,14 @@ async function convert() {
     setStep(4);
     setStatus("Selesai", `${secs < 90 ? secs.toFixed(0) + " detik" : (secs / 60).toFixed(1) + " menit"} · ${removed} header/footer dibuang`, 1);
     showResult(res, blocks, needOcr.size, style);
+    try { if (document.hidden && "Notification" in window && Notification.permission === "granted") new Notification("EPUB selesai", { body: lastEpub.name }); } catch (e) {}
   } catch (e) {
     setStatus("Berhenti", "", 0);
     $("stat").innerHTML = `<span class="err">${esc(e && e.message || String(e))}</span>`;
     log(String(e && e.stack || e));
   } finally {
     running = false; $("go").disabled = !file; $("stop").hidden = true; $("clear").disabled = false;
+    keepAwake(false); document.title = BASE_TITLE;
   }
 }
 $("go").addEventListener("click", () => { if (file && !running) convert(); });
