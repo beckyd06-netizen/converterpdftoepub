@@ -148,6 +148,8 @@ details.logd summary { cursor: pointer; font-size: .82rem; color: var(--muted); 
 .reader h1 + p, .reader h2 + p, .reader h3 + p, .reader h4 + p, .reader figure + p, .reader p.li, .reader p.center, .reader p.note, .reader p.scene, .reader p.scene + p { text-indent: 0; }
 .reader p.li { padding-left: 1.3em; text-indent: -1.3em; margin: .4em 0; }
 .reader p.first { text-indent: 0; }
+h1.himg, h2.himg, h3.himg { text-align: center; }
+.himg img { max-width: 80%; max-height: 4em; height: auto; }
 .reader p.first::first-line { font-variant: small-caps; letter-spacing: .03em; }
 .reader p.center { text-align: center; margin: .6em 0; }
 .reader p.scene { text-align: center; margin: 1.3em 0; }
@@ -260,7 +262,7 @@ footer a { color: var(--accent); }
     <div class="reader-bar"><select id="chsel" aria-label="Pilih bab" hidden></select></div>
     <article class="reader" id="reader"></article>
   </section>
-  <footer>Semua proses berjalan di browser Anda. PDF tidak dikirim ke server mana pun. · Versi 17 Okt 2026 (05.15)</footer>
+  <footer>Semua proses berjalan di browser Anda. PDF tidak dikirim ke server mana pun. · Versi 17 Okt 2026 (08.00)</footer>
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
@@ -277,7 +279,7 @@ const TERMINAL = '.!?:…"”’»';
 const BULLET_RE = /^\s*([•●▪◦‣■□➢►✓✔\-–—*]|\d{1,3}[.)]|[a-zA-Z][.)]|\([0-9a-zA-Z]{1,3}\))\s+\S/;
 const CAPTION_RE = /^(Gambar|Gbr\.?|Figure|Fig\.|Foto|Ilustrasi|Grafik|Diagram|Bagan|Peta|Tabel|Table|Sumber)\s*[\dIVXLC]/i;
 const PAGE_NO_RE = /^[\W_]*(halaman|hal\.?|page|pg\.?)?\s*([0-9]{1,4}|[ivxlcdm]{1,7})\s*((\/|\||dari|of)\s*[0-9]{1,4})?[\W_]*$/i;
-const SCENE_RE = /^[\*\s·•~#⁂◆❖✦✧○◦\-—_=]{1,15}$/;
+const SCENE_RE = /^([\*\s·•~#⁂◆❖✦✧○◦\-—_=]{1,15}|[\s\-—–~_=]*[oO0°]{2,5}[\s\-—–~_=]*)$/;
 const BAB_RE = /^(bab|bagian|chapter|part)?\s*([0-9]{1,3}|[ivxlcdm]{1,6})\.?$/i;
 const BOLD_RE = /bold|black|heavy|semibold|demi|extrab|ultrab/i;
 const ITALIC_RE = /italic|oblique|slant|kursif/i;
@@ -468,8 +470,9 @@ function removeHeadersFooters(pages) {
   for (const [it, k] of keyed) {
     const n = counts.get(k) || 0, b = body[it.src] || it.size;
     // judul berjalan (mis. nama bab di atas tiap halaman): kecil dan berulang minimal 3 halaman
-    if (n >= thresh || PAGE_NO_RE.test(it.text.trim()) ||
+    if (n >= thresh || PAGE_NO_RE.test(it.text.trim()) || /(www\.|https?:\/\/|\.(com|net|org|id|co)\b)/i.test(it.text) ||
         (n >= 3 && npages >= 6 && it.size <= b * 1.05 && k.length > 2) ||
+        (n >= 3 && npages >= 6 && k.length > 2 && !it.img) ||
         (n >= 2 && npages >= 6 && it.size <= b * 0.92 && k.length > 2)) drop.add(it);
   }
   for (const p of pages) p.items = p.items.filter(it => !drop.has(it));
@@ -517,7 +520,7 @@ function classifyHeadings(pages, body, outline) {
     if (!t || t.length > 160 || !/[A-Za-zÀ-ÿ0-9]/.test(t)) continue;
     if (PAGE_NO_RE.test(t) && !BAB_RE.test(t)) continue;
     const b = body[it.src] || it.size, r = it.size / Math.max(b, 0.1);
-    if (r >= (it.src === "ocr" ? 1.28 : 1.14)) { it._r = r; cands.push(it); }
+    if (r >= (it.img ? 1.0 : it.src === "ocr" ? 1.28 : 1.14)) { it._r = r; cands.push(it); } // judul bergambar selalu judul
   }
   const sizes = [...new Set(cands.map(it => Math.round(it._r * 100) / 100))].sort((a, b) => b - a);
   const clusters = [];
@@ -617,6 +620,9 @@ function refineHeadings(pages) {
     if (n && !chap.has(n) && n._pg === l._pg && n.top - l.bottom < 1.2 * l.size && letterCount(n.text) >= 3 &&
         n.text.trim().length <= 60 && upperRatio(n.text) >= 0.8 && !isChapterLine(n.text)) chap.add(n);
   }
+  // judul tulisan tangan (bergambar) = judul bab bila ada >= 3
+  const imgt = lines.filter(l => l.img && l.hlevel);
+  if (imgt.length >= 3) imgt.forEach(l => chap.add(l));
   // judul yang sama berulang (mis. "GRAMEDIA penerbit buku utama") bukan judul bab
   const count = new Map();
   for (const l of lines) if (l.hlevel) { const k = l.text.trim().toLowerCase(); count.set(k, (count.get(k) || 0) + 1); }
@@ -625,11 +631,11 @@ function refineHeadings(pages) {
   // buku berbab (novel): judul lain yang sangat jarang = sampah OCR (logo, hiasan), bukan sub-judul
   for (const l of lines) {
     if (useChap && chap.has(l)) { l.hlevel = 1; continue; }
-    if (!l.hlevel || l._outline) continue;
+    if (!l.hlevel || l._outline || l.img) continue;
     const t = l.text.trim();
     if (junkHeading(t) || (count.get(t.toLowerCase()) || 0) >= 2) l.hlevel = 0;
   }
-  const others = useChap ? lines.filter(l => l.hlevel && !chap.has(l) && !l._outline) : [];
+  const others = useChap ? lines.filter(l => l.hlevel && !chap.has(l) && !l._outline && !l.img) : [];
   const dropOthers = useChap && others.length < 0.3 * nChap;
   for (const l of others) l.hlevel = dropOthers ? 0 : Math.max(2, l.hlevel);  // sisa: sampah langka, atau sub-judul
 }
@@ -646,7 +652,13 @@ function within1(a, b) {
 }
 function fixHeadingTypos(pages, vocab) {
   // salah ketik OCR di judul ("JMMY", "PELTUALANGAN") dicocokkan dengan kata yang sering muncul di isi buku
-  const common = [...vocab].filter(([w, n]) => n >= 3 && w.length >= 4 && /^\p{L}+$/u.test(w));
+  const common = [...vocab].filter(([w, n]) => n >= 3 && w.length >= 3 && /^\p{L}+$/u.test(w));
+  // judul tulisan tangan bernomor: nomor diperbaiki berdasarkan urutan ("j. aku" -> "1. aku")
+  const imgs = [];
+  for (const p of pages) for (const it of p.items) if (it.type === "line" && it.img && it.hlevel) imgs.push(it);
+  const NUM_RE = /^\W?[\dIlJj|!]{1,3}\s*[.,]\s*/;
+  if (imgs.length >= 3 && imgs.filter(it => NUM_RE.test(it.text) && /\S/.test(it.text.replace(NUM_RE, ""))).length >= 0.6 * imgs.length)
+    imgs.forEach((it, n) => { it.text = it.text.replace(NUM_RE, `${n + 1}. `); it.tokens = it.text.split(/\s+/).map((w, i) => [w, false, false, false, i > 0]); });
   for (const p of pages) for (const it of p.items) {
     if (it.type !== "line" || !it.hlevel) continue;
     for (const t of it.tokens) {
@@ -656,7 +668,7 @@ function fixHeadingTypos(pages, vocab) {
       if ((vocab.get(lw) || 0) >= 2) continue;
       let best = null, bn = 0;
       // hanya huruf hilang/berlebih (JMMY→JIMMY); huruf tertukar bisa jadi kata lain yang benar (bertamu/bertemu)
-      for (const [w, n] of common) if (n > bn && w.length !== lw.length && within1(lw, w)) { best = w; bn = n; }
+      for (const [w, n] of common) if (n > bn && (it.img || w.length !== lw.length) && within1(lw, w)) { best = w; bn = n; }
       if (!best) continue;
       const fixed = m[2] === m[2].toUpperCase() ? best.toUpperCase() : m[2][0] === m[2][0].toUpperCase() ? best[0].toUpperCase() + best.slice(1) : best;
       t[0] = m[1] + fixed + m[3];
@@ -870,11 +882,12 @@ function buildBlocks(pages, outline) {
         flush();
         const txt = smartTypo(normCh(it.text.trim()), "");
         const last = blocks[blocks.length - 1];
+        if (last && last.t === "h" && last.page === p.page && last.img && it.img) continue; // judul bergambar ganda
         if (last && last.t === "h" && last.page === p.page && (last.level === it.hlevel || BAB_RE.test(last.plain)) && it.top - last.bottom < 2.2 * it.size) {
           if (BAB_RE.test(last.plain) && !last.html.includes("<span")) last.html = `<span class="num">${last.html}</span>${esc(txt)}`;
           else last.html += " " + esc(txt);
           last.plain += " " + txt; last.level = Math.min(last.level, it.hlevel); last.bottom = it.bottom;
-        } else blocks.push({ t: "h", level: it.hlevel, html: esc(txt), plain: txt, page: p.page, bottom: it.bottom });
+        } else blocks.push({ t: "h", level: it.hlevel, html: esc(txt), plain: txt, page: p.page, bottom: it.bottom, img: it.img || null, imgExt: it.imgExt });
         continue;
       }
       if (cur.length && isBreak(cur[cur.length - 1], it, M, stats)) flush();
@@ -1382,6 +1395,54 @@ function normalizeForOcr(c) {
   return out;
 }
 
+async function findTitleBand(tlines, canvas, k, figs, worker) {
+  const body = tlines.filter(l => (l.conf ?? 0) >= 85 && l.text.length >= 20).sort((a, b) => a.top - b.top);
+  if (body.length < 3) return null;
+  const W = canvas.width, H = canvas.height, first = body[0];
+  if (tlines.some(l => l.top < first.top - 1 && l.top > 0.12 * H * k && !/(www\.|\.com)/i.test(l.text) && l.text.trim().length >= 12)) return null;
+  if (first.top < 0.2 * H * k) return null;                  // bukan halaman awal bab
+  const sz = first.size / k;
+  const img = canvas.getContext("2d", { willReadFrequently: true }).getImageData(0, 0, W, H).data;
+  const known = tlines.filter(l => (l.conf ?? 0) >= 75 && !l.img && l.size <= 1.3 * first.size).map(l => [l.x0 / k - 3, l.top / k - 3, l.x1 / k + 3, l.bottom / k + 3]);
+  // area gambar & baris cetak yang sudah terbaca bukan judul
+  const inFig = (x, y) => figs.some(b => x >= b[0] && x <= b[2] && y >= b[1] && y <= b[3]) || known.some(b => x >= b[0] && x <= b[2] && y >= b[1] && y <= b[3]);
+  const x0r = Math.floor(0.05 * W), x1r = Math.floor(0.95 * W);
+  const rowInk = y => { let c = 0; for (let x = x0r; x < x1r; x += 2) { const i = (y * W + x) * 4; if (img[i] + img[i + 1] + img[i + 2] < 450 && !inFig(x, y)) { if (++c > 2) return true; } } return false; };
+  let y = Math.floor(first.top / k) - 2;
+  for (let tries = 0; tries < 3; tries++) {
+    while (y > 0 && !rowInk(y)) y--;
+    if (y <= 0) return null;
+    const y1 = y; let gap = 0;
+    while (y > 0 && gap < 0.6 * sz) { gap = rowInk(y) ? 0 : gap + 1; y--; }
+    const y0 = y + gap;
+    let cx0 = W, cx1 = 0;   // lebar penuh dari tinta asli (hanya area gambar yang dikecualikan)
+    const inPic = (x, yy) => figs.some(b => x >= b[0] && x <= b[2] && yy >= b[1] && yy <= b[3]);
+    for (let yy = y0; yy <= y1; yy++) for (let x = x0r; x < x1r; x++) { const i = (yy * W + x) * 4; if (img[i] + img[i + 1] + img[i + 2] < 450) { if (x < cx0) cx0 = x; if (x > cx1) cx1 = x; } }
+    if (cx1 <= cx0) return null;
+    const bw = cx1 - cx0, bh = y1 - y0;
+    if (bh > 6 * sz) return null;                              // ilustrasi, bukan judul
+    if (bw < 2.5 * sz || bh < 0.6 * sz) continue;              // nomor bagian kecil -> lanjut ke atas
+    const rect = { left: Math.max(0, cx0 - 10), top: Math.max(0, y0 - 8) };
+    rect.width = Math.min(W, cx1 + 10) - rect.left; rect.height = Math.min(H, y1 + 8) - rect.top;
+    await worker.setParameters({ tessedit_pageseg_mode: "7" });
+    let txt = "";
+    try { txt = ((await worker.recognize(canvas, { rectangle: rect })).data.text || "").replace(/\s+/g, " ").trim(); }
+    finally { await worker.setParameters({ tessedit_pageseg_mode: "3" }); }
+    let above = false;
+    for (let yy = Math.floor(0.12 * H); yy < y0 - 0.5 * sz && !above; yy += 2) above = rowInk(yy);
+    if (!/^\W?[\dIlJj|!]{1,3}\s*[.,]\s*\S/.test(txt) && above) return null;
+    txt = txt || "Bab";
+    let tr = trimCanvas(crop(canvas, rect.left, rect.top, rect.left + rect.width, rect.top + rect.height));
+    if (!tr) return null;
+    tr = cleanLineart(tr);
+    const enc = await encodeCanvas(tr, 900);
+    return { type: "line", tokens: txt.split(/\s+/).map((w, i) => [w, false, false, false, i > 0]), text: txt,
+      x0: rect.left * k, x1: (rect.left + rect.width) * k, top: y0 * k, bottom: y1 * k, size: Math.max(bh * k, 1.9 * first.size),
+      group: 0, bold: false, italic: false, hint: null, conf: 50, src: "ocr", img: enc.blob, imgExt: enc.ext };
+  }
+  return null;
+}
+
 async function findMissedDropcaps(lines, canvas, k, worker) {
   const out = [], body = lines.filter(l => l.group === 0 || l.group === 1).sort((a, b) => a.top - b.top);
   if (body.length < 4) return out;
@@ -1483,6 +1544,52 @@ async function ocrPage(page, pno, opts, worker) {
     if (ln.conf != null && !/["“”'‘’.,?!…—–-]/.test(ln.text) && ((letters < 4 && ln.conf < 70) || (letters < 9 && ln.conf < 50))) continue;
     if (letters >= Math.max(2, 0.4 * ln.text.replace(/ /g, "").length)) { ln.src = "ocr"; items.push(ln); }
   }
+  const URL_RE = /(www\.|https?:\/\/|\.(com|net|org)\b)/i;
+  // halaman tulisan tangan (daftar isi/persembahan) atau halaman penuh ilustrasi kecil (daftar tokoh bergambar):
+  // simpan sebagai satu gambar utuh, bukan teks OCR yang kacau
+  const tlines = items.filter(it => it.type === "line");
+  const tot = tlines.reduce((s2, it) => s2 + it.text.length, 0);
+  const printed = tlines.filter(it => (it.conf ?? 0) >= 88 && it.text.length >= 25).length;
+  const avgConf = tot ? tlines.reduce((s2, it) => s2 + it.text.length * (it.conf ?? 0), 0) / tot : 100;
+  if (opts.images && ((tot && printed < 2 && tot < 900 && avgConf < 82) || figs.length >= 4)) {
+    const clean = crop(canvas, 0, 0, canvas.width, canvas.height), cctx = clean.getContext("2d");
+    cctx.fillStyle = "#fff";
+    for (const it of tlines) if (URL_RE.test(it.text)) cctx.fillRect(it.x0 / k - 8, it.top / k - 4, (it.x1 - it.x0) / k + 16, (it.bottom - it.top) / k + 8);
+    let tr = trimCanvas(clean);
+    if (tr) {
+      tr = cleanLineart(tr);
+      const pw = canvas.width * k, ph = canvas.height * k;
+      const enc = await encodeCanvas(tr, opts.maxImg);
+      freeCanvas(canvas);
+      return { page: pno, W: pw, H: ph, items: [{ type: "fig", blob: enc.blob, ext: enc.ext, x0: 0, x1: pw, top: 0, bottom: ph, group: 0 }], src: "ocr" };
+    }
+  }
+  // judul tulisan tangan (besar, skor OCR rendah): simpan potongan gambarnya untuk ditampilkan apa adanya
+  if (tlines.length && opts.images) {
+    const sz2 = tlines.map(it => it.size).sort((a2, b2) => a2 - b2), med2 = sz2[sz2.length >> 1];
+    for (const it of tlines) {
+      if (it.img || !(it.size > 1.8 * med2 && it.size < 4.5 * med2 && (it.conf ?? 100) < 85 && it.text.length <= 60 &&
+          it.top > 0.12 * canvas.height * k && (it.bottom - it.top) < 0.1 * canvas.height * k &&     // bukan potongan ilustrasi
+          [...it.text].filter(ch => /\p{L}/u.test(ch)).length >= 3)) continue;
+      // lebar penuh tulisan di pita itu (OCR sering hanya menangkap sebagian kata tulisan tangan)
+      const by0 = Math.max(0, Math.floor(it.top / k - 0.4 * it.size / k)), by1 = Math.min(canvas.height, Math.ceil(it.bottom / k + 0.4 * it.size / k));
+      const bx0 = Math.floor(0.03 * canvas.width), bw = Math.floor(0.94 * canvas.width);
+      const bd = canvas.getContext("2d", { willReadFrequently: true }).getImageData(bx0, by0, bw, Math.max(1, by1 - by0)).data;
+      let cx0 = -1, cx1 = -1;
+      for (let x = 0; x < bw; x++) { let c = 0; for (let y = 0; y < by1 - by0; y++) { const i = (y * bw + x) * 4; if (bd[i] + bd[i + 1] + bd[i + 2] < 450) c++; } if (c > 1) { if (cx0 < 0) cx0 = x; cx1 = x; } }
+      const lx0 = cx0 >= 0 ? bx0 + cx0 - 10 : it.x0 / k - 3 * it.size / k, lx1 = cx0 >= 0 ? bx0 + cx1 + 10 : it.x1 / k + 2 * it.size / k;
+      const cr = crop(canvas, lx0, by0, lx1, by1);
+      let tr = cr && trimCanvas(cr);
+      if (!tr) continue;
+      tr = cleanLineart(tr);
+      const enc = await encodeCanvas(tr, 900);
+      it.img = enc.blob; it.imgExt = enc.ext;
+    }
+  }
+  // judul bab tulisan tangan yang tak terbaca OCR: halaman yang teksnya mulai di tengah -> cari pita tinta di atasnya
+  if (opts.images && !tlines.some(it => it.img)) {
+    try { const tl = await findTitleBand(tlines, canvas, k, figs, worker); if (tl) { items.push(tl); tlines.push(tl); } } catch (e) {}
+  }
   for (const b of figs) {
     const cr = crop(canvas, ...b);
     let tr = cr && trimCanvas(cr);
@@ -1576,8 +1683,21 @@ async function writeEpub(blocks, style, meta, coverBlob) {
       if (b.t === "h") {
         hid++;
         const lvl = Math.max(1, Math.min(4, b.level));
-        body.push(`<h${lvl} id="h${hid}">${b.html}</h${lvl}>`);
-        pv.push(`<h${lvl}>${b.html}</h${lvl}>`);
+        if (b.img) {
+          const key = await blobMd5ish(b.img);
+          if (!images.has(key)) {
+            const iname = `img${String(images.size + 1).padStart(3, "0")}.${b.imgExt}`;
+            images.set(key, { iname, url: URL.createObjectURL(b.img) });
+            zip.file("OEBPS/images/" + iname, b.img);
+            manifest.push(`<item id="${iname.split(".")[0]}" href="images/${iname}" media-type="${b.imgExt === "jpg" ? "image/jpeg" : "image/png"}"/>`);
+          }
+          const im = images.get(key);
+          body.push(`<h${lvl} id="h${hid}" class="himg"><img src="../images/${im.iname}" alt="${escAttr(b.plain)}"/></h${lvl}>`);
+          pv.push(`<h${lvl} class="himg"><img src="${im.url}" alt="${escAttr(b.plain)}"></h${lvl}>`);
+        } else {
+          body.push(`<h${lvl} id="h${hid}">${b.html}</h${lvl}>`);
+          pv.push(`<h${lvl}>${b.html}</h${lvl}>`);
+        }
         if (lvl <= tocMax) nav.push([lvl, b.plain, fname + (first ? "#h" + hid : "")]);
         first = true;
       } else if (b.t === "p") {
@@ -1726,7 +1846,10 @@ async function convert() {
     for (const i of idx) {
       const info = infos.get(i), nchars = info.words.reduce((s, w) => s + w.text.length, 0);
       if (opts.ocr === "force") needOcr.add(i);
-      else if (opts.ocr === "auto" && ((nchars < 25 && (info.images.length || info.curves.nCurves > 80)) || textQualityBad(info.words))) needOcr.add(i);
+      // halaman scan: gambar besar menutupi halaman dan teksnya cuma sedikit (mis. hanya watermark situs)
+      else if (opts.ocr === "auto" && ((nchars < 25 && (info.images.length || info.curves.nCurves > 80)) ||
+        (nchars < 200 && info.images.some(im => (im.b[2] - im.b[0]) * (im.b[3] - im.b[1]) > 0.6 * info.W * info.H)) ||
+        textQualityBad(info.words))) needOcr.add(i);
     }
     if (needOcr.size) {
       log(`${needOcr.size} halaman perlu OCR.`);
