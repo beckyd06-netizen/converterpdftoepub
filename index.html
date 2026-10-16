@@ -260,7 +260,7 @@ footer a { color: var(--accent); }
     <div class="reader-bar"><select id="chsel" aria-label="Pilih bab" hidden></select></div>
     <article class="reader" id="reader"></article>
   </section>
-  <footer>Semua proses berjalan di browser Anda. PDF tidak dikirim ke server mana pun. · Versi 17 Okt 2026 (04.30)</footer>
+  <footer>Semua proses berjalan di browser Anda. PDF tidak dikirim ke server mana pun. · Versi 17 Okt 2026 (05.15)</footer>
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
@@ -407,7 +407,8 @@ function wordsToLines(words) {
     let prev = null;
     for (const w of ws) {
       const sup = w.hint === null && w.size < 0.86 * size && w.bottom < base - 0.15 * size;
-      const space = prev === null ? false : (w.x0 - prev.x1) > 0.1 * Math.min(size, w.size * (sup ? 1.4 : 1));
+      // kata hasil OCR sudah terpisah per kata -> selalu beri spasi (baris rapat tidak menempel)
+      const space = prev === null ? false : (w.hint !== null || (w.x0 - prev.x1) > 0.1 * Math.min(size, w.size * (sup ? 1.4 : 1)));
       toks.push([w.text, w.bold, w.italic, sup, space]);
       prev = w;
     }
@@ -587,7 +588,7 @@ function isChapterLine(t) {
 function junkHeading(t) {
   t = t.trim();
   if (letterCount(t) < 3) return true;                       // "Gn", "Da"
-  if (/^["“”'‘’(\[«»—–-]/.test(t)) return true;             // dialog
+  if (/^["“”'‘’(\[«»—–\-/|\\]/.test(t)) return true;       // dialog / sisa logo
   if (startsLower(t)) return true;                            // potongan kalimat
   if (/[,;:]$/.test(t)) return true;
   if (/\.$/.test(t) && t.split(/\s+/).length > 3) return true; // kalimat biasa
