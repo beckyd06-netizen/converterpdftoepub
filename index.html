@@ -262,7 +262,7 @@ footer a { color: var(--accent); }
     <div class="reader-bar"><select id="chsel" aria-label="Pilih bab" hidden></select></div>
     <article class="reader" id="reader"></article>
   </section>
-  <footer>Semua proses berjalan di browser Anda. PDF tidak dikirim ke server mana pun. · Versi 17 Okt 2026 (v22)</footer>
+  <footer>Semua proses berjalan di browser Anda. PDF tidak dikirim ke server mana pun. · Versi 17 Okt 2026 (v23)</footer>
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
@@ -1461,6 +1461,7 @@ async function findTitleBand(tlines, canvas, k, figs, worker) {
     if (cx1 <= cx0) return null;
     const bw = cx1 - cx0, bh = y1 - y0;
     if (bw < 2.5 * sz || bh < 0.6 * sz) continue;              // nomor bagian kecil -> lanjut ke atas
+    if (tlines.some(l => (l.conf ?? 0) >= 80 && !l.img && l.top / k < y1 && l.bottom / k > y0 && l.text.trim().length >= 3)) return null;  // judul cetak sudah terbaca
     const rect = { left: Math.max(0, cx0 - 10), top: Math.max(0, y0 - 8) };
     rect.width = Math.min(W, cx1 + 10) - rect.left; rect.height = Math.min(H, y1 + 8) - rect.top;
     await worker.setParameters({ tessedit_pageseg_mode: "7" });
@@ -1506,12 +1507,22 @@ async function findMissedDropcaps(lines, canvas, k, worker) {
     if (rect.width < 8 || rect.height < 8) continue;
     // ada tinta di area itu?
     const d = canvas.getContext("2d", { willReadFrequently: true }).getImageData(rect.left, rect.top, rect.width, rect.height).data;
-    let dark = 0;
-    for (let j = 0; j < d.length; j += 4) if (d[j] + d[j + 1] + d[j + 2] < 384) dark++;
-    if (dark / (d.length / 4) < 0.03) continue;
+    // huruf awal sering dicetak abu-abu muda -> jadikan hitam-putih tegas dulu
+    let light = 0, minG = 255;
+    for (let j = 0; j < d.length; j += 4) { const g = (d[j] + d[j + 1] + d[j + 2]) / 3; if (g < 200) light++; if (g < minG) minG = g; }
+    if (light / (d.length / 4) < 0.03) continue;
+    const thr = Math.min(220, (minG + 230) / 2), PAD = 20;
+    const bc = newCanvas(rect.width + 2 * PAD, rect.height + 2 * PAD), bx = bc.getContext("2d");
+    const bi = bx.createImageData(bc.width, bc.height);
+    bi.data.fill(255);
+    for (let yy = 0; yy < rect.height; yy++) for (let xx = 0; xx < rect.width; xx++) {
+      const j = (yy * rect.width + xx) * 4, v = (d[j] + d[j + 1] + d[j + 2]) / 3 <= thr ? 0 : 255, o = ((yy + PAD) * bc.width + xx + PAD) * 4;
+      bi.data[o] = bi.data[o + 1] = bi.data[o + 2] = v;
+    }
+    bx.putImageData(bi, 0, 0);
     await worker.setParameters({ tessedit_pageseg_mode: "10" });
     let t = "";
-    try { t = ((await worker.recognize(canvas, { rectangle: rect })).data.text || "").replace(/[^\p{L}]/gu, ""); }
+    try { t = ((await worker.recognize(bc)).data.text || "").replace(/[^\p{L}]/gu, ""); }
     finally { await worker.setParameters({ tessedit_pageseg_mode: "3" }); }
     if (t.length !== 1) continue;
     const ch = t.toUpperCase();
@@ -1644,6 +1655,10 @@ async function ocrPage(page, pno, opts, worker) {
     items.push(it);
   }
   freeCanvas(canvas);
+  for (const it of items)                                       // "BAB 1:" huruf kapital kecil sering terbaca "Ban 1:"
+    if (it.type === "line" && it.tokens && it.tokens.length && /^(Ban|Bam|Bah|Bas|Baa)$/.test(it.tokens[0][0]) && /^\S+\s+(\d{1,2}|[IVX]{1,4})\b/.test(it.text)) {
+      it.tokens[0][0] = "Bab"; it.text = "Bab" + it.text.slice(it.text.split(/\s/)[0].length);
+    }
   return { page: pno, W, H, items: orderItems(items), src: "ocr" };
 }
 
