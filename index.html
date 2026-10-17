@@ -262,7 +262,7 @@ footer a { color: var(--accent); }
     <div class="reader-bar"><select id="chsel" aria-label="Pilih bab" hidden></select></div>
     <article class="reader" id="reader"></article>
   </section>
-  <footer>Semua proses berjalan di browser Anda. PDF tidak dikirim ke server mana pun. · Versi 17 Okt 2026 (v23)</footer>
+  <footer>Semua proses berjalan di browser Anda. PDF tidak dikirim ke server mana pun. · Versi 17 Okt 2026 (v27)</footer>
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
@@ -613,8 +613,29 @@ function refineHeadings(pages) {
   const lines = [];
   for (const p of pages) { const ls = p.items.filter(it => it.type === "line"); ls.forEach((l, i) => { l._pg = p; l._next = ls[i + 1]; }); lines.push(...ls); }
   const chap = new Set();
+  // halaman daftar isi: baris-barisnya bukan judul bab (tapi dipakai untuk menamai bab)
+  const TOC_T = /^\W*(daftar\s+isi|isi\s+buku|contents?|table of contents)\W*$/i;
+  const tocPg = new Set(), tocNames = new Map(), tocSubs = new Set();
+  for (const p of pages) {
+    const ls = p.items.filter(it => it.type === "line");
+    if (!ls.length) continue;
+    const hasT = ls.some(l => TOC_T.test(l.text.trim()));
+    const numd = ls.filter(l => /\s\.*\s*\d{1,3}$/.test(l.text.trim())).length;
+    const nbab = ls.filter(l => /^(bab|bagian|chapter|part)\s+[\divxlcdm]{1,6}\s*[:.\-–—]\s*\S/i.test(l.text.trim())).length;
+    const prevToc = [...tocPg].some(q => q.page === p.page - 1);
+    if (!(hasT || (ls.length >= 4 && numd >= 0.4 * ls.length) || (prevToc && (nbab >= 2 || numd >= 0.25 * ls.length)))) continue;
+    tocPg.add(p);
+    for (const l of ls) {
+      const t = l.text.trim();
+      if (!TOC_T.test(t)) l.hlevel = 0;
+      const m = t.match(/^((?:bab|bagian|chapter|part)\s+[\divxlcdm]{1,6})\s*[:.\-–—]\s*(.+?)(?:\s*\.*\s*\d{1,3})?$/i);
+      if (m) { const key = m[2].toLowerCase().replace(/[^a-z]+/g, ""); if (key) tocNames.set(key, m[1][0].toUpperCase() + m[1].slice(1).toLowerCase()); }
+      else if (!l.hlevel) { const sub = t.replace(/\s*\.*\s*\d{1,3}$/, "").toLowerCase().replace(/[^a-z]+/g, ""); if (sub.length >= 6) tocSubs.add(sub); }
+    }
+  }
   for (const l of lines) {
     const t = l.text.trim();
+    if (tocPg.has(l._pg)) continue;
     if (isChapterLine(t)) chap.add(l);
     // "5" di satu baris, judul KAPITAL di baris berikutnya
     else if (/^\d{1,3}\.?$/.test(t) && l._next && l._next.top - l.bottom < 3 * l.size) {
@@ -649,8 +670,49 @@ function refineHeadings(pages) {
   // judul yang sama berulang (mis. "GRAMEDIA penerbit buku utama") bukan judul bab
   const count = new Map();
   for (const l of lines) if (l.hlevel) { const k = l.text.trim().toLowerCase(); count.set(k, (count.get(k) || 0) + 1); }
-  const nChap = new Set([...chap].filter(l => !/^\d{1,3}\.?$/.test(l.text.trim()))).size;
+  let nChap = new Set([...chap].filter(l => !/^\d{1,3}\.?$/.test(l.text.trim()))).size;
+  // baris isi yang ukurannya "membesar" karena OCR: panjang dan berakhir di tengah kalimat -> bukan judul
+  for (const l of lines) {
+    const t = l.text.trim();
+    if (l.hlevel && !l.img && !l._outline && t.length >= 40 && /([a-z\u00e0-\u00ff,;\-]|\w-)$/.test(t)) l.hlevel = 0;
+  }
+  // tidak ada pola "Bab N", tapi daftar isi menyebut "Bab N: Judul" -> judul besar yang cocok = bab
+  if (nChap < 3 && tocNames.size) {
+    const hit = [];
+    for (const l of lines) {
+      if (!l.hlevel || tocPg.has(l._pg)) continue;
+      const key = l.text.toLowerCase().replace(/[^a-z]+/g, "");
+      let kk = tocNames.has(key) ? key : null;
+      if (!kk && key.length >= 6) for (const k2 of tocNames.keys())
+        if (simRatio(key, k2) >= 0.85 || (k2.length >= 10 && key.startsWith(k2)) || (key.length >= 10 && k2.startsWith(key))) { kk = k2; break; }
+      const pre = kk ? tocNames.get(kk) : null;
+      if (pre && !hit.some(h => h[1].startsWith(pre + ":"))) hit.push([l, `${pre}: ${l.text.trim()}`, kk]);
+    }
+    if (hit.length >= 3) {
+      for (let [l, name, kk] of hit) {
+        const sim = t => simRatio(t.toLowerCase().replace(/[^a-z]+/g, ""), kk);
+        const n = l._next;                       // judul bab dua baris: "Kegagalan adalah Jalan untuk" + "Maju"
+        if (n && n._pg === l._pg && n.hlevel && !n.img && n.top - l.bottom >= -l.size && n.top - l.bottom < l.size
+            && Math.abs(n.size - l.size) < 0.3 * l.size && n.text.length <= 60
+            && (sim(l.text + n.text) > sim(l.text) || kk.length > l.text.toLowerCase().replace(/[^a-z]+/g, "").length + 2)) {
+          name += " " + n.text.trim(); n.hlevel = 0;
+          n._pg.items = n._pg.items.filter(it => it !== n); l._next = n._next;
+        }
+        l.text = name; l.tokens = name.split(/\s+/).map((w, i) => [w, false, false, false, i > 0]); chap.add(l); }
+      nChap = hit.length;
+    }
+  }
   const useChap = nChap >= 3;
+  // sub-judul yang disebut di daftar isi (huruf tebal seukuran isi, tak terdeteksi dari ukuran)
+  const subHit = [];
+  if (tocSubs.size) {
+    const seen = new Set();
+    for (const l of lines) {
+      if (tocPg.has(l._pg) || chap.has(l) || l.img || l.text.length > 90) continue;
+      const key = l.text.toLowerCase().replace(/[^a-z]+/g, "");
+      if (key.length >= 6 && tocSubs.has(key) && !seen.has(key)) { seen.add(key); subHit.push(l); }
+    }
+  }
   // buku berbab (novel): judul lain yang sangat jarang = sampah OCR (logo, hiasan), bukan sub-judul
   for (const l of lines) {
     if (useChap && chap.has(l)) { l.hlevel = 1; continue; }
@@ -661,6 +723,7 @@ function refineHeadings(pages) {
   const others = useChap ? lines.filter(l => l.hlevel && !chap.has(l) && !l._outline && !l.img) : [];
   const dropOthers = useChap && others.length < 0.3 * nChap;
   for (const l of others) l.hlevel = dropOthers ? 0 : Math.max(2, l.hlevel);  // sisa: sampah langka, atau sub-judul
+  if (subHit.length >= 3) subHit.forEach(l => { l.hlevel = useChap ? 2 : 1; });
 }
 
 function within1(a, b) {
@@ -733,6 +796,9 @@ function resolveHyphen(frag, nxt, vocab, hyph) {
 function isBreak(prev, ln, M, stats) {
   const same = prev._page === ln._page && prev.group === ln.group;
   if (BULLET_RE.test(ln.text)) return true;
+  // kata terpenggal di akhir baris ("bah-" + "wa ...") -> pasti masih paragraf yang sama
+  // (huruf kecil sebelum "-": OCR kadang salah membaca huruf awal baris berikutnya jadi kapital)
+  if (/[a-z\u00e0-\u00ff]-$/.test(prev.text.trimEnd()) && /^\W{0,2}\p{L}[a-z]/u.test(ln.text.trim()) && !!prev._note === !!ln._note) return false;
   if (Math.abs(ln.size - prev.size) > (ln.src === "ocr" ? 0.4 : 0.18) * Math.max(prev.size, 0.1)) return true;
   if (!!prev._note !== !!ln._note) return true;
   const m = M.get(ln._page + ":" + ln.group);
@@ -747,7 +813,10 @@ function isBreak(prev, ln, M, stats) {
   if (gap > pitch * 1.4 + 1) { stats.gap++; return true; }
   if (gap < 0) return endsTerminal(prev.text) && !startsLower(ln.text);
   if (prev._dropcap && ln.x0 < prev.x0) return false;
-  if (ln.x0 - prev.x0 > 0.8 * ln.size && ln.x0 - m.left < 0.25 * m.width) { stats.indent++; return true; }
+  if (ln.x0 - prev.x0 > 0.8 * ln.size && ln.x0 - m.left < 0.25 * m.width) {
+    if (!endsTerminal(prev.text) && startsLower(ln.text)) return false;   // indentasi gantung (daftar bernomor), kalimat masih berlanjut
+    stats.indent++; return true;
+  }
   const short = m.right - prev.x1;
   if (m.justified) {
     if (short > 0.2 * m.width) return true;
@@ -779,6 +848,11 @@ function tokensToHtml(lines, vocab, hyph) {
       lt[0][4] = true;
       if (last[0].endsWith("­")) { last[0] = last[0].slice(0, -1); lt[0][4] = false; }
       else if (/[\p{L}\p{N}]-$/u.test(last[0])) {
+        {
+          // OCR kadang membaca huruf awal baris sebagai kapital ("se-" + "Cara") -> "secara"
+          const nw0 = lt[0][0], fr = last[0].slice(0, -1).replace(/^.*[^\p{L}\p{N}_]/u, ""), w0 = (nw0.match(/^[\p{L}\p{N}_]*/u) || [""])[0];
+          if (nw0.length > 1 && /^\p{Lu}\p{Ll}/u.test(nw0) && /\p{Ll}$/u.test(fr) && vocab.get((fr + w0).toLowerCase())) lt[0][0] = nw0[0].toLowerCase() + nw0.slice(1);
+        }
         if (!resolveHyphen(last[0], lt[0][0], vocab, hyph)) last[0] = last[0].slice(0, -1);
         lt[0][4] = false;
       } else if (/[—–/]$/.test(last[0])) lt[0][4] = false;
@@ -1496,7 +1570,8 @@ async function findMissedDropcaps(lines, canvas, k, worker) {
     if (!(ind > 1.2 * sz && ind < 6 * sz)) continue;
     const run = [l];
     for (const nb of body.slice(i + 1, i + 4)) {
-      if (Math.abs(nb.x0 - l.x0) < 0.4 * sz && nb.top - run[run.length - 1].bottom < 1.2 * sz) run.push(nb); else break;
+      // baris di sebelah huruf awal: menjorok sama (atau lebih, mis. awal paragraf baru)
+      if (nb.x0 - l.x0 > -0.4 * sz && nb.x0 - left > 1.2 * nb.size && nb.top - run[run.length - 1].bottom < 1.2 * sz) run.push(nb); else break;
     }
     if (run.length < 2) continue;
     const prev = body[i - 1];
@@ -1506,12 +1581,23 @@ async function findMissedDropcaps(lines, canvas, k, worker) {
     rect.height = Math.round(run[run.length - 1].bottom / k) - rect.top;
     if (rect.width < 8 || rect.height < 8) continue;
     // ada tinta di area itu?
-    const d = canvas.getContext("2d", { willReadFrequently: true }).getImageData(rect.left, rect.top, rect.width, rect.height).data;
+    let d = canvas.getContext("2d", { willReadFrequently: true }).getImageData(rect.left, rect.top, rect.width, rect.height).data;
     // huruf awal sering dicetak abu-abu muda -> jadikan hitam-putih tegas dulu
     let light = 0, minG = 255;
     for (let j = 0; j < d.length; j += 4) { const g = (d[j] + d[j + 1] + d[j + 2]) / 3; if (g < 200) light++; if (g < minG) minG = g; }
     if (light / (d.length / 4) < 0.03) continue;
     const thr = Math.min(220, (minG + 230) / 2), PAD = 20;
+    // huruf awal sering lebih tinggi dari baris yang terdeteksi -> lanjutkan ke bawah selama masih ada tinta
+    {
+      const maxExt = Math.round(3 * sz / k), ctx2 = canvas.getContext("2d", { willReadFrequently: true });
+      let ext = 0;
+      while (ext < maxExt && rect.top + rect.height + ext < canvas.height) {
+        const row = ctx2.getImageData(rect.left, rect.top + rect.height + ext, rect.width, 1).data;
+        let ink = false; for (let j = 0; j < row.length; j += 4) if ((row[j] + row[j + 1] + row[j + 2]) / 3 <= thr) { ink = true; break; }
+        if (!ink) break; ext++;
+      }
+      if (ext) { rect.height += ext; d = ctx2.getImageData(rect.left, rect.top, rect.width, rect.height).data; }
+    }
     const bc = newCanvas(rect.width + 2 * PAD, rect.height + 2 * PAD), bx = bc.getContext("2d");
     const bi = bx.createImageData(bc.width, bc.height);
     bi.data.fill(255);
@@ -1522,8 +1608,15 @@ async function findMissedDropcaps(lines, canvas, k, worker) {
     bx.putImageData(bi, 0, 0);
     await worker.setParameters({ tessedit_pageseg_mode: "10" });
     let t = "";
-    try { t = ((await worker.recognize(bc)).data.text || "").replace(/[^\p{L}]/gu, ""); }
-    finally { await worker.setParameters({ tessedit_pageseg_mode: "3" }); }
+    const MAP = { "$": "S", "0": "O", "|": "I", "1": "I", "€": "C", "(": "C" };
+    try {
+      for (const psm of ["10", "8"]) {
+        await worker.setParameters({ tessedit_pageseg_mode: psm });
+        const raw = ((await worker.recognize(bc)).data.text || "").trim();
+        t = (MAP[raw] || raw).replace(/[^\p{L}]/gu, "");
+        if (t.length === 1) break;
+      }
+    } finally { await worker.setParameters({ tessedit_pageseg_mode: "3" }); }
     if (t.length !== 1) continue;
     const ch = t.toUpperCase();
     out.push({ type: "line", tokens: [[ch, false, false, false, false]], text: ch, x0: left, x1: l.x0 - 0.2 * sz,
@@ -1655,6 +1748,28 @@ async function ocrPage(page, pno, opts, worker) {
     items.push(it);
   }
   freeCanvas(canvas);
+  // watermark situs ("www.bacaan-indo.blogspot.com") yang ikut terbaca OCR -> buang
+  const URLW = /(www\.|https?:|blogspot|wordpress|\.(com|net|org|id|co|cor|corn)\b)/i;
+  for (let i = items.length - 1; i >= 0; i--) {
+    const it = items[i];
+    if (it.type !== "line" || it.img) continue;
+    const ws = it.text.split(/\s+/).filter(Boolean), rest = ws.filter(w => !URLW.test(w));
+    if (rest.length < ws.length && rest.reduce((a, w) => a + w.replace(/\W/g, "").length, 0) < 6) items.splice(i, 1);
+  }
+  // bintik/garis dari tepi kertas di depan baris ("- rowski", "| Dia") -> buang
+  {
+    const lx = items.filter(it => it.type === "line" && it.text.length > 30).map(it => it.x0).sort((a, b) => a - b);
+    if (lx.length) {
+      const left0 = lx[Math.floor(lx.length / 2)];
+      for (const it of items) {
+        const tk = it.tokens;
+        if (it.type === "line" && tk && tk.length > 1 && /^[-|.,'`‘’:;!]+$/.test(tk[0][0]) && it.x0 < left0 - 0.4 * it.size) {
+          tk.shift(); tk[0][4] = false;
+          it.text = tk.map(t => (t[4] ? " " : "") + t[0]).join("").trim();
+        }
+      }
+    }
+  }
   for (const it of items)                                       // "BAB 1:" huruf kapital kecil sering terbaca "Ban 1:"
     if (it.type === "line" && it.tokens && it.tokens.length && /^(Ban|Bam|Bah|Bas|Baa)$/.test(it.tokens[0][0]) && /^\S+\s+(\d{1,2}|[IVX]{1,4})\b/.test(it.text)) {
       it.tokens[0][0] = "Bab"; it.text = "Bab" + it.text.slice(it.text.split(/\s/)[0].length);
