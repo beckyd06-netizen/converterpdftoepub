@@ -262,7 +262,7 @@ footer a { color: var(--accent); }
     <div class="reader-bar"><select id="chsel" aria-label="Pilih bab" hidden></select></div>
     <article class="reader" id="reader"></article>
   </section>
-  <footer>Semua proses berjalan di browser Anda. PDF tidak dikirim ke server mana pun. · Versi 17 Okt 2026 (v20)</footer>
+  <footer>Semua proses berjalan di browser Anda. PDF tidak dikirim ke server mana pun. · Versi 17 Okt 2026 (v22)</footer>
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
@@ -601,6 +601,14 @@ function junkHeading(t) {
   }
   return false;
 }
+// kemiripan dua kata (2*LCS/panjang total), mirip difflib.SequenceMatcher.ratio
+function simRatio(a, b) {
+  if (!a.length && !b.length) return 1;
+  const dp = Array.from({ length: a.length + 1 }, () => new Array(b.length + 1).fill(0));
+  for (let i = 1; i <= a.length; i++) for (let j = 1; j <= b.length; j++)
+    dp[i][j] = a[i - 1] === b[j - 1] ? dp[i - 1][j - 1] + 1 : Math.max(dp[i - 1][j], dp[i][j - 1]);
+  return 2 * dp[a.length][b.length] / (a.length + b.length);
+}
 function refineHeadings(pages) {
   const lines = [];
   for (const p of pages) { const ls = p.items.filter(it => it.type === "line"); ls.forEach((l, i) => { l._pg = p; l._next = ls[i + 1]; }); lines.push(...ls); }
@@ -627,17 +635,16 @@ function refineHeadings(pages) {
   const repC = new Map(); imgt.forEach(l => repC.set(keyOf(l), (repC.get(keyOf(l)) || 0) + 1));
   imgt.forEach(l => { if (repC.get(keyOf(l)) >= 2 && !/^\W?\d/.test(l.text)) { l.hlevel = 0; l.img = null; } });
   imgt = imgt.filter(l => l.hlevel);
-  // bila hampir semua judul bergambar bernomor ("12. Porseni"), yang tanpa nomor biasanya
-  // judul bab yang diulang sebagai kepala halaman berikutnya -> buang
-  const numd = imgt.filter(l => /^\W?\S{1,3}\s*[.,]\s*\S/.test(l.text));
-  if (imgt.length >= 5 && numd.length >= 0.75 * imgt.length) {
-    const drop = new Set(imgt.filter(l => !numd.includes(l) && !l._titleband));
-    if (drop.size) {
-      drop.forEach(l => { l.hlevel = 0; });
-      for (const p of pages) p.items = p.items.filter(it => !drop.has(it));
-      imgt = imgt.filter(l => !drop.has(l));
-    }
+  // judul bab yang diulang sebagai kepala halaman sesudahnya ("10. Pengakuan" lalu "Pengakuan") -> buang
+  const lastKey = l => { const w = l.text.toLowerCase().split(/\s+/).filter(Boolean); return w.length ? w[w.length - 1].replace(/[^a-z]+/g, "") : ""; };
+  const drop = new Set(); let prevT = null;
+  for (const l of imgt) {
+    const key = lastKey(l), pg = l._pg.page;
+    if (prevT && !l._titleband && !/^\W?\S{1,3}\s*[.,]\s*\S/.test(l.text) && pg - prevT[1] > 0 && pg - prevT[1] <= 3
+        && key.length >= 4 && simRatio(key, prevT[0]) >= 0.6) { drop.add(l); l.hlevel = 0; continue; }
+    prevT = [key, pg];
   }
+  if (drop.size) { for (const p of pages) p.items = p.items.filter(it => !drop.has(it)); imgt = imgt.filter(l => !drop.has(l)); }
   if (imgt.length >= 3) imgt.forEach(l => chap.add(l));
   // judul yang sama berulang (mis. "GRAMEDIA penerbit buku utama") bukan judul bab
   const count = new Map();
@@ -1461,9 +1468,11 @@ async function findTitleBand(tlines, canvas, k, figs, worker) {
     try { txt = ((await worker.recognize(canvas, { rectangle: rect })).data.text || "").replace(/\s+/g, " ").trim(); }
     finally { await worker.setParameters({ tessedit_pageseg_mode: "3" }); }
     let above = false;
-    for (let yy = Math.floor(0.12 * H); yy < y0 - 0.5 * sz && !above; yy += 2) above = rowInk(yy);
+    // ada tinta lain di atas judul? (ilustrasi tidak dihitung)
+    const rowInkNoFig = yy => { let c = 0; for (let x = x0r; x < x1r; x += 2) { const i = (yy * W + x) * 4; if (img[i] + img[i + 1] + img[i + 2] < 450 && !inFig(x, yy) && !figs.some(b => x >= b[0] && x <= b[2] && yy >= b[1] && yy <= b[3])) { if (++c > 2) return true; } } return false; };
+    for (let yy = Math.floor(0.12 * H); yy < y0 - 0.5 * sz && !above; yy += 2) above = rowInkNoFig(yy);
     const inPicBox = figs.filter(b => b[1] <= y0 && y0 <= b[3] && b[0] <= (cx0 + cx1) / 2 && (cx0 + cx1) / 2 <= b[2]);
-    if (!/^\W?[\dIlJj|!]{1,3}\s*[.,]\s*\S/.test(txt) && (above || inPicBox.length || tall)) return null;
+    if (!/^\W?[\dIlJj|!\/]{1,3}\s*[.,]\s*\S/.test(txt) && (above || ((inPicBox.length || tall) && !/^\W?\S{1,3}\s*[.,]\s*\S/.test(txt)))) return null;
     inPicBox.forEach(b => { b[3] = Math.max(b[1] + 1, y0 - 12); });   // potong ilustrasi supaya judul tidak ikut
     txt = txt || "Bab";
     let tr = trimCanvas(crop(canvas, rect.left, rect.top, rect.left + rect.width, rect.top + rect.height));
