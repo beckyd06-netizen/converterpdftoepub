@@ -262,7 +262,7 @@ footer a { color: var(--accent); }
     <div class="reader-bar"><select id="chsel" aria-label="Pilih bab" hidden></select></div>
     <article class="reader" id="reader"></article>
   </section>
-  <footer>Semua proses berjalan di browser Anda. PDF tidak dikirim ke server mana pun. · Versi 17 Okt 2026 (v27)</footer>
+  <footer>Semua proses berjalan di browser Anda. PDF tidak dikirim ke server mana pun. · Versi 17 Okt 2026 (v28)</footer>
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
@@ -1437,12 +1437,30 @@ async function getTesseract(onProgress) {
   if (tessWorker) return tessWorker;
   if (!window.Tesseract) throw new Error("Pustaka OCR tidak termuat.");
   const opts = { workerPath: TESS_WORKER, corePath: TESS_CORE, gzip: true, logger: m => { if (onProgress) onProgress(m); } };
-  try {
-    // data bahasa Indonesia ikut di repo (folder tessdata), cadangan dari CDN
-    tessWorker = await Tesseract.createWorker("ind", 1, { ...opts, langPath: new URL("tessdata", location.href).href });
-  } catch (e) {
-    tessWorker = await Tesseract.createWorker("ind", 1, opts);
+  // data bahasa Indonesia ikut di repo (folder tessdata), cadangan dari CDN.
+  // Kadang unduhan/cache di browser macet di "loading language traineddata 0%" -> batas waktu, lalu coba sumber lain
+  const local = new URL("tessdata", location.href).href;
+  const tries = [
+    [{ langPath: local }, 45000],
+    [{ langPath: local, cacheMethod: "refresh" }, 60000],
+    [{ cacheMethod: "refresh" }, 120000],          // CDN bawaan tesseract.js
+  ];
+  let lastErr = null;
+  for (const [extra, ms] of tries) {
+    let timer;
+    try {
+      tessWorker = await Promise.race([
+        Tesseract.createWorker("ind", 1, { ...opts, ...extra }),
+        new Promise((_, rej) => { timer = setTimeout(() => rej(new Error("waktu habis memuat data bahasa")), ms); }),
+      ]);
+      clearTimeout(timer);
+      break;
+    } catch (e) {
+      clearTimeout(timer); lastErr = e; tessWorker = null;
+      if (onProgress) onProgress({ status: "mencoba sumber data bahasa lain (" + (e.message || e) + ")", progress: 0 });
+    }
   }
+  if (!tessWorker) throw new Error("Data bahasa OCR gagal dimuat: " + (lastErr && lastErr.message || lastErr) + ". Periksa koneksi internet lalu muat ulang halaman.");
   await tessWorker.setParameters({ tessedit_pageseg_mode: "3", preserve_interword_spaces: "0" });
   return tessWorker;
 }
