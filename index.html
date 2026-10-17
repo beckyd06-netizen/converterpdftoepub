@@ -262,7 +262,7 @@ footer a { color: var(--accent); }
     <div class="reader-bar"><select id="chsel" aria-label="Pilih bab" hidden></select></div>
     <article class="reader" id="reader"></article>
   </section>
-  <footer>Semua proses berjalan di browser Anda. PDF tidak dikirim ke server mana pun. · Versi 17 Okt 2026 (08.00)</footer>
+  <footer>Semua proses berjalan di browser Anda. PDF tidak dikirim ke server mana pun. · Versi 17 Okt 2026 (v20)</footer>
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
@@ -621,7 +621,23 @@ function refineHeadings(pages) {
         n.text.trim().length <= 60 && upperRatio(n.text) >= 0.8 && !isChapterLine(n.text)) chap.add(n);
   }
   // judul tulisan tangan (bergambar) = judul bab bila ada >= 3
-  const imgt = lines.filter(l => l.img && l.hlevel);
+  let imgt = lines.filter(l => l.img && l.hlevel);
+  // judul bergambar yang sama berulang di banyak halaman = judul berjalan (mis. "Dilan #2"), bukan bab
+  const keyOf = l => l.text.toLowerCase().replace(/\W+/g, "");
+  const repC = new Map(); imgt.forEach(l => repC.set(keyOf(l), (repC.get(keyOf(l)) || 0) + 1));
+  imgt.forEach(l => { if (repC.get(keyOf(l)) >= 2 && !/^\W?\d/.test(l.text)) { l.hlevel = 0; l.img = null; } });
+  imgt = imgt.filter(l => l.hlevel);
+  // bila hampir semua judul bergambar bernomor ("12. Porseni"), yang tanpa nomor biasanya
+  // judul bab yang diulang sebagai kepala halaman berikutnya -> buang
+  const numd = imgt.filter(l => /^\W?\S{1,3}\s*[.,]\s*\S/.test(l.text));
+  if (imgt.length >= 5 && numd.length >= 0.75 * imgt.length) {
+    const drop = new Set(imgt.filter(l => !numd.includes(l) && !l._titleband));
+    if (drop.size) {
+      drop.forEach(l => { l.hlevel = 0; });
+      for (const p of pages) p.items = p.items.filter(it => !drop.has(it));
+      imgt = imgt.filter(l => !drop.has(l));
+    }
+  }
   if (imgt.length >= 3) imgt.forEach(l => chap.add(l));
   // judul yang sama berulang (mis. "GRAMEDIA penerbit buku utama") bukan judul bab
   const count = new Map();
@@ -1405,22 +1421,38 @@ async function findTitleBand(tlines, canvas, k, figs, worker) {
   const img = canvas.getContext("2d", { willReadFrequently: true }).getImageData(0, 0, W, H).data;
   const known = tlines.filter(l => (l.conf ?? 0) >= 75 && !l.img && l.size <= 1.3 * first.size).map(l => [l.x0 / k - 3, l.top / k - 3, l.x1 / k + 3, l.bottom / k + 3]);
   // area gambar & baris cetak yang sudah terbaca bukan judul
-  const inFig = (x, y) => figs.some(b => x >= b[0] && x <= b[2] && y >= b[1] && y <= b[3]) || known.some(b => x >= b[0] && x <= b[2] && y >= b[1] && y <= b[3]);
+  // judul bisa saja ikut terkurung kotak ilustrasi -> hanya baris cetak yang sudah terbaca yang dimasking
+  const inFig = (x, y) => known.some(b => x >= b[0] && x <= b[2] && y >= b[1] && y <= b[3]);
   const x0r = Math.floor(0.05 * W), x1r = Math.floor(0.95 * W);
+  const rawCnt = y => { let c = 0; for (let x = x0r; x < x1r; x += 2) { const i = (y * W + x) * 4; if (img[i] + img[i + 1] + img[i + 2] < 450) c++; } return c; };
   const rowInk = y => { let c = 0; for (let x = x0r; x < x1r; x += 2) { const i = (y * W + x) * 4; if (img[i] + img[i + 1] + img[i + 2] < 450 && !inFig(x, y)) { if (++c > 2) return true; } } return false; };
   let y = Math.floor(first.top / k) - 2;
   for (let tries = 0; tries < 3; tries++) {
     while (y > 0 && !rowInk(y)) y--;
     if (y <= 0) return null;
-    const y1 = y; let gap = 0;
+    let y1 = y, gap = 0;
     while (y > 0 && gap < 0.6 * sz) { gap = rowInk(y) ? 0 : gap + 1; y--; }
-    const y0 = y + gap;
+    let y0 = y + gap;
+    // baris judul yang terbaca sebagian ikut termasking -> lebarkan pakai tinta asli
+    const lim = Math.floor(first.top / k) - 2;
+    while (y1 + 1 < lim && rawCnt(y1 + 1) > 1) y1++;
+    while (y0 > 1 && rawCnt(y0 - 1) > 1 && y1 - y0 < 6 * sz) y0--;
+    const tall = y1 - y0 > 6 * sz;
+    if (tall) {                                                // judul tulisan tangan menempel di bawah ilustrasi -> cari lembah tinta
+      const lo = Math.floor(y1 - 4.5 * sz), hi = Math.floor(y1 - 1.2 * sz);
+      if (lo <= y0) return null;
+      let mx = 0; for (let yy = y0; yy < y1; yy += 3) mx = Math.max(mx, rawCnt(yy));
+      let best = 1e9, yv = lo;
+      for (let yy = lo; yy < hi; yy++) { const c = rawCnt(yy); if (c < best) { best = c; yv = yy; } }
+      if (best > 0.005 * mx + 1) return null;                // ilustrasi, bukan judul
+      y0 = yv + 1;
+      while (y0 < y1 && rawCnt(y0) <= 1) y0++;
+    }
     let cx0 = W, cx1 = 0;   // lebar penuh dari tinta asli (hanya area gambar yang dikecualikan)
     const inPic = (x, yy) => figs.some(b => x >= b[0] && x <= b[2] && yy >= b[1] && yy <= b[3]);
     for (let yy = y0; yy <= y1; yy++) for (let x = x0r; x < x1r; x++) { const i = (yy * W + x) * 4; if (img[i] + img[i + 1] + img[i + 2] < 450) { if (x < cx0) cx0 = x; if (x > cx1) cx1 = x; } }
     if (cx1 <= cx0) return null;
     const bw = cx1 - cx0, bh = y1 - y0;
-    if (bh > 6 * sz) return null;                              // ilustrasi, bukan judul
     if (bw < 2.5 * sz || bh < 0.6 * sz) continue;              // nomor bagian kecil -> lanjut ke atas
     const rect = { left: Math.max(0, cx0 - 10), top: Math.max(0, y0 - 8) };
     rect.width = Math.min(W, cx1 + 10) - rect.left; rect.height = Math.min(H, y1 + 8) - rect.top;
@@ -1430,7 +1462,9 @@ async function findTitleBand(tlines, canvas, k, figs, worker) {
     finally { await worker.setParameters({ tessedit_pageseg_mode: "3" }); }
     let above = false;
     for (let yy = Math.floor(0.12 * H); yy < y0 - 0.5 * sz && !above; yy += 2) above = rowInk(yy);
-    if (!/^\W?[\dIlJj|!]{1,3}\s*[.,]\s*\S/.test(txt) && above) return null;
+    const inPicBox = figs.filter(b => b[1] <= y0 && y0 <= b[3] && b[0] <= (cx0 + cx1) / 2 && (cx0 + cx1) / 2 <= b[2]);
+    if (!/^\W?[\dIlJj|!]{1,3}\s*[.,]\s*\S/.test(txt) && (above || inPicBox.length || tall)) return null;
+    inPicBox.forEach(b => { b[3] = Math.max(b[1] + 1, y0 - 12); });   // potong ilustrasi supaya judul tidak ikut
     txt = txt || "Bab";
     let tr = trimCanvas(crop(canvas, rect.left, rect.top, rect.left + rect.width, rect.top + rect.height));
     if (!tr) return null;
@@ -1438,7 +1472,7 @@ async function findTitleBand(tlines, canvas, k, figs, worker) {
     const enc = await encodeCanvas(tr, 900);
     return { type: "line", tokens: txt.split(/\s+/).map((w, i) => [w, false, false, false, i > 0]), text: txt,
       x0: rect.left * k, x1: (rect.left + rect.width) * k, top: y0 * k, bottom: y1 * k, size: Math.max(bh * k, 1.9 * first.size),
-      group: 0, bold: false, italic: false, hint: null, conf: 50, src: "ocr", img: enc.blob, imgExt: enc.ext };
+      group: 0, bold: false, italic: false, hint: null, conf: 50, src: "ocr", img: enc.blob, imgExt: enc.ext, _titleband: true };
   }
   return null;
 }
@@ -1569,7 +1603,7 @@ async function ocrPage(page, pno, opts, worker) {
     const sz2 = tlines.map(it => it.size).sort((a2, b2) => a2 - b2), med2 = sz2[sz2.length >> 1];
     for (const it of tlines) {
       if (it.img || !(it.size > 1.8 * med2 && it.size < 4.5 * med2 && (it.conf ?? 100) < 85 && it.text.length <= 60 &&
-          it.top > 0.12 * canvas.height * k && (it.bottom - it.top) < 0.1 * canvas.height * k &&     // bukan potongan ilustrasi
+          it.top > 0.18 * canvas.height * k && (it.bottom - it.top) < 0.1 * canvas.height * k &&     // bukan potongan ilustrasi
           [...it.text].filter(ch => /\p{L}/u.test(ch)).length >= 3)) continue;
       // lebar penuh tulisan di pita itu (OCR sering hanya menangkap sebagian kata tulisan tangan)
       const by0 = Math.max(0, Math.floor(it.top / k - 0.4 * it.size / k)), by1 = Math.min(canvas.height, Math.ceil(it.bottom / k + 0.4 * it.size / k));
